@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Jify Shipping
  * Description: Quantity-based shipping cost manager with dynamic UI, variation support, min-max range logic, smart cart guidance, and mixed products handling. Forces separate checkout.
- * Version: 3.9.0
+ * Version: 3.9.2
  * Author: jify cloud
  */
 
@@ -66,6 +66,17 @@ class Jify_Shipping_Upgrade {
         add_action( 'wp_ajax_nopriv_jify_shipping_notify_admin', array( __CLASS__, 'handle_notify_admin' ) );
         add_action( 'wp_ajax_jify_shipping_get_quote', array( __CLASS__, 'handle_get_quote' ) );
         add_action( 'wp_ajax_nopriv_jify_shipping_get_quote', array( __CLASS__, 'handle_get_quote' ) );
+
+        add_action( 'astra_checkout_login_field_before', array( __CLASS__, 'render_google_login_in_customer_info' ) );
+    }
+
+    public static function render_google_login_in_customer_info() {
+        if ( is_user_logged_in() ) {
+            return;
+        }
+        if ( shortcode_exists( 'nextend_social_login' ) ) {
+            echo do_shortcode( '[nextend_social_login]' );
+        }
     }
 
     public static function force_translate_strings( $translated_text, $text, $domain ) {
@@ -553,7 +564,8 @@ class Jify_Shipping_Upgrade {
     private static function send_admin_notify_email( $cart_hash, $entry ) {
         $notify_emails = self::get_notify_emails();
         if ( empty( $notify_emails ) ) {
-            return;
+            error_log( '[jify-shipping] admin notify skipped: OPTION_NOTIFY_EMAIL is empty (Jify Setting → Notify Email 未設定)' );
+            return false;
         }
         $items = isset( $entry['items'] ) && is_array( $entry['items'] ) ? implode( ', ', $entry['items'] ) : '';
         $subject = __( 'Jify Shipping: New Mixed Order Notification', 'jify-shipping' );
@@ -570,16 +582,29 @@ class Jify_Shipping_Upgrade {
         self::$mail_from_name = get_option( 'woocommerce_email_from_name', '' );
         add_filter( 'wp_mail_from', array( __CLASS__, 'filter_wp_mail_from' ) );
         add_filter( 'wp_mail_from_name', array( __CLASS__, 'filter_wp_mail_from_name' ) );
-        wp_mail( $notify_emails, $subject, $message );
+        $sent = wp_mail( $notify_emails, $subject, $message );
         remove_filter( 'wp_mail_from', array( __CLASS__, 'filter_wp_mail_from' ) );
         remove_filter( 'wp_mail_from_name', array( __CLASS__, 'filter_wp_mail_from_name' ) );
         self::$mail_from = null;
         self::$mail_from_name = null;
+        if ( ! $sent ) {
+            error_log( sprintf(
+                '[jify-shipping] admin notify wp_mail() returned false: hash=%s, to=%s — 檢查 SMTP 設定',
+                $cart_hash,
+                implode( ',', (array) $notify_emails )
+            ) );
+        }
+        return $sent;
     }
 
     private static function send_customer_quote_email( $cart_hash, $entry, $amount ) {
         $to_email = isset( $entry['customer_email'] ) ? sanitize_email( $entry['customer_email'] ) : '';
         if ( ! is_email( $to_email ) ) {
+            error_log( sprintf(
+                '[jify-shipping] customer quote email skipped: invalid email for hash=%s (raw=%s)',
+                $cart_hash,
+                isset( $entry['customer_email'] ) ? $entry['customer_email'] : '(missing)'
+            ) );
             return false;
         }
 
@@ -607,11 +632,19 @@ class Jify_Shipping_Upgrade {
         add_filter( 'wp_mail_from_name', array( __CLASS__, 'filter_wp_mail_from_name' ) );
         
         $sent = wp_mail( $to_email, $subject, $message );
-        
+
         remove_filter( 'wp_mail_from', array( __CLASS__, 'filter_wp_mail_from' ) );
         remove_filter( 'wp_mail_from_name', array( __CLASS__, 'filter_wp_mail_from_name' ) );
         self::$mail_from = null;
         self::$mail_from_name = null;
+
+        if ( ! $sent ) {
+            error_log( sprintf(
+                '[jify-shipping] customer quote email wp_mail() returned false: hash=%s, to=%s — 檢查 SMTP 設定',
+                $cart_hash,
+                $to_email
+            ) );
+        }
 
         return $sent;
     }
@@ -684,9 +717,24 @@ class Jify_Shipping_Upgrade {
             var notifyNonce = <?php echo wp_json_encode( wp_create_nonce( 'jify_shipping_notify' ) ); ?>;
             var quoteNonce = <?php echo wp_json_encode( wp_create_nonce( 'jify_shipping_quote' ) ); ?>;
 
+            // update_checkout re-renders this block, so kill any stale timer
+            // from a previous render — otherwise setInterval calls compound
+            // and the checkout flashes its loading overlay non-stop.
+            if (window.jifyShippingPollTimer) {
+                clearInterval(window.jifyShippingPollTimer);
+                window.jifyShippingPollTimer = null;
+            }
+
             function getCheckoutField(selector) {
                 var $el = $(selector);
                 return $el.length ? $el.val() : '';
+            }
+
+            function stopPolling() {
+                if (window.jifyShippingPollTimer) {
+                    clearInterval(window.jifyShippingPollTimer);
+                    window.jifyShippingPollTimer = null;
+                }
             }
 
             function pollQuote() {
@@ -695,6 +743,11 @@ class Jify_Shipping_Upgrade {
                     nonce: quoteNonce
                 }).done(function(resp) {
                     if (resp && resp.success && resp.data && resp.data.quote !== '') {
+                        stopPolling();
+                        if (window.jifyShippingQuoteApplied) {
+                            return;
+                        }
+                        window.jifyShippingQuoteApplied = true;
                         $('#jify-notify-admin').prop('disabled', true);
                         $('#jify-notify-status').text('<?php echo esc_js( __( '已收到報價，正在更新運費...', 'jify-shipping' ) ); ?>');
                         $(document.body).trigger('update_checkout');
@@ -732,9 +785,12 @@ class Jify_Shipping_Upgrade {
             });
 
             <?php if ( $has_quote ) : ?>
-            $(document.body).trigger('update_checkout');
+            if (!window.jifyShippingQuoteApplied) {
+                window.jifyShippingQuoteApplied = true;
+                $(document.body).trigger('update_checkout');
+            }
             <?php else : ?>
-            setInterval(pollQuote, 5000);
+            window.jifyShippingPollTimer = setInterval(pollQuote, 20000);
             <?php endif; ?>
         });
         </script>
@@ -1364,11 +1420,27 @@ class Jify_Shipping_Upgrade {
                 update_option( self::OPTION_MIXED_QUOTES, $quotes );
 
                 $pending = self::get_pending_orders();
-                if ( isset( $pending[ $cart_hash ] ) ) {
-                    self::send_customer_quote_email( $cart_hash, $pending[ $cart_hash ], $amount );
+                $entry = isset( $pending[ $cart_hash ] ) ? $pending[ $cart_hash ] : null;
+                $is_superseded = $entry && ! empty( $entry['superseded'] );
+                $superseded_by = $is_superseded && ! empty( $entry['superseded_by'] ) ? $entry['superseded_by'] : '';
+
+                $mail_sent = false;
+                if ( $entry ) {
+                    $mail_sent = (bool) self::send_customer_quote_email( $cart_hash, $entry, $amount );
                 }
 
-                echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( '運費已更新並已寄出通知信。', 'jify-shipping' ) . '</p></div>';
+                if ( ! $entry ) {
+                    echo '<div class="notice notice-warning is-dismissible"><p>' . esc_html__( '運費已儲存，但找不到對應的客戶資料 (cart_hash 不在 pending)，未寄出通知信。', 'jify-shipping' ) . '</p></div>';
+                } elseif ( $is_superseded ) {
+                    echo '<div class="notice notice-warning is-dismissible"><p>' . sprintf(
+                        esc_html__( '注意：此筆購物車已被新版本取代 (新 hash: %s)，客戶端 cart 已變動，自動套用報價可能失效，建議改報新 hash。', 'jify-shipping' ),
+                        '<code>' . esc_html( $superseded_by ) . '</code>'
+                    ) . '</p></div>';
+                } elseif ( ! $mail_sent ) {
+                    echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__( '運費已儲存，但通知信寄送失敗，請檢查 SMTP 設定（FluentSMTP / WP Mail SMTP）。', 'jify-shipping' ) . '</p></div>';
+                } else {
+                    echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( '運費已更新並已寄出通知信。', 'jify-shipping' ) . '</p></div>';
+                }
             }
         }
 
