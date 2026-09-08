@@ -28,7 +28,8 @@ It solves the "Mixed Products" shipping problem where certain combinations of it
 
 1.  Upload the plugin files to the `/wp-content/plugins/jify-shipping` directory, or install the plugin through the WordPress plugins screen directly.
 2.  Activate the plugin through the 'Plugins' screen in WordPress.
-3.  Go to Product Data > Jify Shipping tab to configure rules for each product.
+3.  Add Jify Shipping to the applicable WooCommerce > Settings > Shipping > Shipping zone.
+4.  Go to Product Data > Jify Shipping tab to configure rules for each product.
 
 == Frequently Asked Questions ==
 
@@ -36,7 +37,7 @@ It solves the "Mixed Products" shipping problem where certain combinations of it
 Yes, Jify Shipping fully supports product variations. You can define unique shipping cost rules for each variation.
 
 = How does the mixed product quote work? =
-When a customer adds products that are flagged as "Mixed Shipping" along with other items, the checkout can be paused. The admin receives a notification, calculates the custom shipping cost, and updates the order. The customer is then notified to complete payment.
+Mixed carts and quantities outside configured rules enter a pending-quote flow. The customer submits the notification form; the admin records a quote for that cart hash and sends an email notification. The original cart can then use the quote. No WooCommerce order is created at the quote stage, and the email does not restore the cart. The standard checkout button can be disabled while waiting, but this is not a server-side guarantee across all checkout entry points.
 
 == Changelog ==
 
